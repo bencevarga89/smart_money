@@ -1,5 +1,6 @@
 import os
 import requests
+import datetime
 import pandas as pd
 import yfinance as yf
 from collections import defaultdict
@@ -45,10 +46,32 @@ def get_latest_valid_filing(company):
         print(f"Error fetching filings: {e}")
         return None
 
+def get_last_completed_quarter_end(today=None):
+    """
+    Calculates the exact calendar quarter-end date prior to today.
+    13F filings reflect positions as of these quarter ends:
+    Q1: Mar 31 | Q2: Jun 30 | Q3: Sep 30 | Q4: Dec 31
+    """
+    if today is None:
+        today = datetime.date.today()
+    year = today.year
+    month = today.month
+    
+    if month in [1, 2, 3]:
+        return datetime.date(year - 1, 12, 31)
+    elif month in [4, 5, 6]:
+        return datetime.date(year, 3, 31)
+    elif month in [7, 8, 9]:
+        return datetime.date(year, 6, 30)
+    else:
+        return datetime.date(year, 9, 30)
+
 def scan_institutional_clusters():
-    print("Running enterprise-grade institutional cluster scan (10% max drift)...")
+    print("Running enterprise-grade institutional cluster scan...")
     
     cluster_data = defaultdict(lambda: {"funds": [], "conviction_buyers": 0})
+    quarter_end_date = get_last_completed_quarter_end()
+    print(f"Anchoring price drift calculation to quarter-end date: {quarter_end_date}")
 
     for cik, fund_name in TOP_12_FUNDS.items():
         try:
@@ -86,6 +109,7 @@ def scan_institutional_clusters():
                 if not clean_ticker or clean_ticker == "NAN":
                     continue
 
+                # Gate 1: Skin in the game (Position >= 1.5% of total portfolio value)
                 position_weight = (val / total_portfolio_value) * 100 if total_portfolio_value > 0 else 0
                 if position_weight < 1.5:
                     continue 
@@ -105,22 +129,33 @@ def scan_institutional_clusters():
         if len(unique_funds) >= 3:
             try:
                 stock = yf.Ticker(ticker)
-                hist = stock.history(period="3mo")
+                
+                # Fetch historical price starting near the quarter-end date
+                start_fetch = quarter_end_date - datetime.timedelta(days=7)
+                hist = stock.history(start=start_fetch.strftime('%Y-%m-%d'))
+                
                 if hist.empty or len(hist) < 2:
                     continue
 
-                q_start = float(hist["Close"].iloc[0])
+                # Filter history strictly on or after the exact quarter-end date
+                valid_hist = hist[hist.index.date >= quarter_end_date]
+                if valid_hist.empty:
+                    valid_hist = hist
+
+                q_start = float(valid_hist["Close"].iloc[0])
                 current = float(hist["Close"].iloc[-1])
                 drift = ((current - q_start) / q_start) * 100
 
-                # Strict Gate: Price drift must not exceed 10.0%
+                # Gate 2: Strict Price Drift Cap (Max +10.0% run-up since quarter end)
                 if drift > 10.0:
+                    print(f"Skipping {ticker}: Price drift +{drift:.1f}% exceeds 10% limit.")
                     continue
 
                 info = stock.info
                 sector = info.get('sector', 'Unknown Sector')
                 trailing_eps = info.get('trailingEps', 0)
                 
+                # Gate 3: Fundamental Sanity Check
                 if trailing_eps is not None and trailing_eps < -2.0:
                     print(f"Skipping {ticker}: Severe negative earnings (EPS: {trailing_eps})")
                     continue
@@ -132,9 +167,10 @@ def scan_institutional_clusters():
                     f"• **Sector:** `{sector}`\n"
                     f"• **Overlapping Funds:** `{len(unique_funds)}`\n"
                     f"• **New/Accumulated Stakes:** `{data['conviction_buyers']} funds`\n"
-                    f"• **Price Drift:** `+{drift:.1f}%` (${current:.2f})\n\n"
+                    f"• **Price Drift:** `+{drift:.1f}%` (${current:.2f})\n"
+                    f"• **Baseline Quarter-End:** `{quarter_end_date.strftime('%b %d, %Y')}`\n\n"
                     f"🏛 **Backing Funds (Weight > 1.5%):**\n{fund_list}\n\n"
-                    f"💡 *Institutional Quality Check Passed:* High portfolio conviction, solid earnings baseline, and strict price discipline (<= 10% drift)."
+                    f"💡 *Institutional Quality Check Passed:* High portfolio conviction, solid earnings baseline, and strict price discipline (<= 10% drift from quarter-end)."
                 )
                 alerts.append(msg)
 
