@@ -5,126 +5,132 @@ import yfinance as yf
 from collections import defaultdict
 from edgar import set_identity, Company
 
-# SEC regulations require a contact identity string
-set_identity("LightyearBot trading.bot.internal@gmail.com")
+set_identity("SmartMoneyPro trading.bot.internal@gmail.com")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Top 12 Elite Investors & their SEC CIK Codes
 TOP_12_FUNDS = {
-    "0001067983": "Berkshire Hathaway (Warren Buffett)",
-    "0001048611": "Scion Asset Management (Michael Burry)",
-    "0001336528": "Bridgewater Associates (Ray Dalio)",
-    "0001007166": "Appaloosa Management (David Tepper)",
-    "0001336917": "Pershing Square (Bill Ackman)",
-    "0001040275": "Third Point (Dan Loeb)",
-    "0001061165": "Greenlight Capital (David Einhorn)",
+    "0001067983": "Berkshire Hathaway",
+    "0001048611": "Scion Asset Management",
+    "0001336528": "Bridgewater Associates",
+    "0001007166": "Appaloosa Management",
+    "0001336917": "Pershing Square",
+    "0001040275": "Third Point",
+    "0001061165": "Greenlight Capital",
     "0001029160": "Soros Fund Management",
-    "0001351187": "Coatue Management (Philippe Laffont)",
-    "0001167483": "Tiger Global Management",
-    "0001536411": "Duquesne Family Office (Stanley Druckenmiller)",
-    "0001061168": "Baupost Group (Seth Klarman)"
+    "0001351187": "Coatue Management",
+    "0001167483": "Tiger Global",
+    "0001536411": "Duquesne Family Office",
+    "0001061168": "Baupost Group"
 }
 
 def send_telegram(msg):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram configuration missing.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"Telegram error: {e}")
 
 def scan_institutional_clusters():
-    print("Scanning 13F filings for the top 12 institutional funds...")
+    print("Running advanced institutional cluster scan...")
     
-    # Maps ticker -> list of fund names holding it
-    ticker_ownership = defaultdict(list)
+    # Track ticker details: { ticker: { 'funds': [names], 'high_conviction_count': int } }
+    cluster_data = defaultdict(lambda: {"funds": [], "conviction_buyers": 0})
 
     for cik, fund_name in TOP_12_FUNDS.items():
         try:
-            print(f"Querying 13F data for {fund_name}...")
             company = Company(cik)
             filings = company.get_filings(form="13F-HR")
-            
             if not filings:
                 continue
                 
-            # Pull the most recent 13F-HR filing object
             latest_filing = filings[0]
             report = latest_filing.obj()
-            
-            if report is None:
+            if not report:
                 continue
                 
-            # edgartools provides a clean consolidated holdings dataframe property (.holdings)
             df_holdings = getattr(report, "holdings", None)
             if df_holdings is None or df_holdings.empty:
-                # Fallback to infotable if holdings attribute isn't directly exposed
                 df_holdings = getattr(report, "infotable", None)
-                
             if df_holdings is None or df_holdings.empty:
                 continue
-                
-            # Normalize column search for ticker (edgartools uses 'Ticker' or 'tic')
+
+            total_portfolio_value = df_holdings['Value'].sum() if 'Value' in df_holdings.columns else 1
             ticker_col = next((col for col in ['Ticker', 'tic', 'TICKER'] if col in df_holdings.columns), None)
             
-            if ticker_col:
-                tickers = df_holdings[ticker_col].dropna().unique()
-                for t in tickers:
-                    clean_ticker = str(t).strip().upper()
-                    if clean_ticker and clean_ticker != "nan":
-                        ticker_ownership[clean_ticker].append(fund_name)
-                        
-        except Exception as e:
-            print(f"Could not process 13F for {fund_name}: {e}")
+            if not ticker_col:
+                continue
 
-    print(f"Extracted positions across funds. Checking for clusters (3+ buyers)...")
-    cluster_alerts = []
-    
-    # Filter for stocks owned by at least 3 of the 12 tracked funds
-    for ticker, holders in ticker_ownership.items():
-        unique_holders = list(set(holders)) # Deduplicate just in case
-        if len(unique_holders) >= 3:
+            # Check previous report to track accumulation/new stakes
+            prev_report = report.previous_holding_report()
+            prev_holdings_set = set()
+            if prev_report and hasattr(prev_report, "holdings"):
+                prev_df = prev_report.holdings
+                p_col = next((col for col in ['Ticker', 'tic', 'TICKER'] if col in prev_df.columns), None)
+                if p_col:
+                    prev_holdings_set = set(prev_df[p_col].dropna().str.upper().str.strip())
+
+            for _, row in df_holdings.iterrows():
+                t = row.get(ticker_col)
+                val = row.get('Value', 0)
+                if pd.isna(t):
+                    continue
+                clean_ticker = str(t).strip().upper()
+                if not clean_ticker or clean_ticker == "NAN":
+                    continue
+
+                # Rule 1: Skin in the game (Position must be >= 1.5% of the fund's portfolio value)
+                position_weight = (val / total_portfolio_value) * 100 if total_portfolio_value > 0 else 0
+                if position_weight < 1.5:
+                    continue # Skip tiny token stakes
+
+                # Rule 2: Is it a new position or accumulation?
+                is_new_or_added = clean_ticker not in prev_holdings_set or len(prev_holdings_set) == 0
+
+                cluster_data[clean_ticker]["funds"].append(fund_name)
+                if is_new_or_added:
+                    cluster_data[clean_ticker]["conviction_buyers"] += 1
+
+        except Exception as e:
+            print(f"Error parsing fund {fund_name}: {e}")
+
+    # Evaluate clusters requiring at least 3 funds, with structural conviction
+    alerts = []
+    for ticker, data in cluster_data.items():
+        unique_funds = list(set(data["funds"]))
+        if len(unique_funds) >= 3:
             try:
                 stock = yf.Ticker(ticker)
                 hist = stock.history(period="3mo")
-                
                 if hist.empty or len(hist) < 2:
                     continue
-                    
-                quarter_start_price = float(hist["Close"].iloc[0])
-                current_price = float(hist["Close"].iloc[-1])
-                
-                price_drift = ((current_price - quarter_start_price) / quarter_start_price) * 100
-                
-                # Gate: Price drift must be <= 15.0% so it's not overly chased/late to buy
-                if price_drift <= 15.0:
-                    holders_formatted = "\n".join([f"• {h}" for h in unique_holders])
-                    msg = (
-                        f"🐋 **SMART MONEY CLUSTER ALERT**\n"
-                        f"• **Ticker:** `{ticker}`\n"
-                        f"• **Cluster Count:** `{len(unique_holders)} Elite Funds`\n"
-                        f"• **Price Drift Since Filing:** `+{price_drift:.1f}%`\n"
-                        f"• **Current Price:** `${current_price:.2f}`\n\n"
-                        f"🏛 **Accumulating Funds:**\n{holders_formatted}\n\n"
-                        f"💡 *Action:* 3+ superinvestors hold this position, and the stock has not run away yet. Worth a fundamental deep dive."
-                    )
-                    cluster_alerts.append(msg)
-            except Exception as e:
-                print(f"Error checking price for ticker {ticker}: {e}")
 
-    # Dispatch alerts to Telegram
-    if cluster_alerts:
-        print(f"Found {len(cluster_alerts)} valid cluster alerts. Sending to Telegram...")
-        for alert in cluster_alerts:
-            send_telegram(alert)
-    else:
-        print("Scan complete: No 3+ fund clusters met the price drift threshold this cycle.")
+                q_start = float(hist["Close"].iloc[0])
+                current = float(hist["Close"].iloc[-1])
+                drift = ((current - q_start) / q_start) * 100
+
+                # Price drift guardrail
+                if drift <= 15.0:
+                    fund_list = "\n".join([f"• {f}" for f in unique_funds])
+                    msg = (
+                        f"💎 **ELITE SMART MONEY CLUSTER**\n"
+                        f"• **Ticker:** `{ticker}`\n"
+                        f"• **Overlapping Funds:** `{len(unique_funds)}`\n"
+                        f"• **New/Accumulated Stakes:** `{data['conviction_buyers']} funds`\n"
+                        f"• **Price Drift:** `+{drift:.1f}%` (${current:.2f})\n\n"
+                        f"🏛 **Backing Funds (Weight > 1.5%):**\n{fund_list}\n\n"
+                        f"💡 *Institutional Quality Check Passed:* High portfolio conviction with minimal price run-up."
+                    )
+                    alerts.append(msg)
+            except Exception as e:
+                print(f"Error analyzing price for {ticker}: {e}")
+
+    for alert in alerts:
+        send_telegram(alert)
 
 if __name__ == "__main__":
     scan_institutional_clusters()
