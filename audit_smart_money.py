@@ -35,21 +35,25 @@ def send_telegram(msg):
     except Exception as e:
         print(f"Telegram error: {e}")
 
+def get_latest_valid_filing(company):
+    try:
+        filings = company.get_filings(form=["13F-HR", "13F-HR/A"])
+        if not filings:
+            return None
+        return filings[0].obj()
+    except Exception as e:
+        print(f"Error fetching filings: {e}")
+        return None
+
 def scan_institutional_clusters():
-    print("Running advanced institutional cluster scan...")
+    print("Running enterprise-grade institutional cluster scan (10% max drift)...")
     
-    # Track ticker details: { ticker: { 'funds': [names], 'high_conviction_count': int } }
     cluster_data = defaultdict(lambda: {"funds": [], "conviction_buyers": 0})
 
     for cik, fund_name in TOP_12_FUNDS.items():
         try:
             company = Company(cik)
-            filings = company.get_filings(form="13F-HR")
-            if not filings:
-                continue
-                
-            latest_filing = filings[0]
-            report = latest_filing.obj()
+            report = get_latest_valid_filing(company)
             if not report:
                 continue
                 
@@ -65,7 +69,6 @@ def scan_institutional_clusters():
             if not ticker_col:
                 continue
 
-            # Check previous report to track accumulation/new stakes
             prev_report = report.previous_holding_report()
             prev_holdings_set = set()
             if prev_report and hasattr(prev_report, "holdings"):
@@ -83,12 +86,10 @@ def scan_institutional_clusters():
                 if not clean_ticker or clean_ticker == "NAN":
                     continue
 
-                # Rule 1: Skin in the game (Position must be >= 1.5% of the fund's portfolio value)
                 position_weight = (val / total_portfolio_value) * 100 if total_portfolio_value > 0 else 0
                 if position_weight < 1.5:
-                    continue # Skip tiny token stakes
+                    continue 
 
-                # Rule 2: Is it a new position or accumulation?
                 is_new_or_added = clean_ticker not in prev_holdings_set or len(prev_holdings_set) == 0
 
                 cluster_data[clean_ticker]["funds"].append(fund_name)
@@ -98,7 +99,6 @@ def scan_institutional_clusters():
         except Exception as e:
             print(f"Error parsing fund {fund_name}: {e}")
 
-    # Evaluate clusters requiring at least 3 funds, with structural conviction
     alerts = []
     for ticker, data in cluster_data.items():
         unique_funds = list(set(data["funds"]))
@@ -113,21 +113,33 @@ def scan_institutional_clusters():
                 current = float(hist["Close"].iloc[-1])
                 drift = ((current - q_start) / q_start) * 100
 
-                # Price drift guardrail
-                if drift <= 15.0:
-                    fund_list = "\n".join([f"• {f}" for f in unique_funds])
-                    msg = (
-                        f"💎 **ELITE SMART MONEY CLUSTER**\n"
-                        f"• **Ticker:** `{ticker}`\n"
-                        f"• **Overlapping Funds:** `{len(unique_funds)}`\n"
-                        f"• **New/Accumulated Stakes:** `{data['conviction_buyers']} funds`\n"
-                        f"• **Price Drift:** `+{drift:.1f}%` (${current:.2f})\n\n"
-                        f"🏛 **Backing Funds (Weight > 1.5%):**\n{fund_list}\n\n"
-                        f"💡 *Institutional Quality Check Passed:* High portfolio conviction with minimal price run-up."
-                    )
-                    alerts.append(msg)
+                # Strict Gate: Price drift must not exceed 10.0%
+                if drift > 10.0:
+                    continue
+
+                info = stock.info
+                sector = info.get('sector', 'Unknown Sector')
+                trailing_eps = info.get('trailingEps', 0)
+                
+                if trailing_eps is not None and trailing_eps < -2.0:
+                    print(f"Skipping {ticker}: Severe negative earnings (EPS: {trailing_eps})")
+                    continue
+
+                fund_list = "\n".join([f"• {f}" for f in unique_funds])
+                msg = (
+                    f"💎 **ELITE SMART MONEY CLUSTER**\n"
+                    f"• **Ticker:** `{ticker}`\n"
+                    f"• **Sector:** `{sector}`\n"
+                    f"• **Overlapping Funds:** `{len(unique_funds)}`\n"
+                    f"• **New/Accumulated Stakes:** `{data['conviction_buyers']} funds`\n"
+                    f"• **Price Drift:** `+{drift:.1f}%` (${current:.2f})\n\n"
+                    f"🏛 **Backing Funds (Weight > 1.5%):**\n{fund_list}\n\n"
+                    f"💡 *Institutional Quality Check Passed:* High portfolio conviction, solid earnings baseline, and strict price discipline (<= 10% drift)."
+                )
+                alerts.append(msg)
+
             except Exception as e:
-                print(f"Error analyzing price for {ticker}: {e}")
+                print(f"Error analyzing fundamentals/price for {ticker}: {e}")
 
     for alert in alerts:
         send_telegram(alert)
