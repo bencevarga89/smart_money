@@ -2,8 +2,12 @@ name: Smart Money 13F Cluster Auditor
 
 on:
   schedule:
-    - cron: '0 12 1 * *' # Runs at 12:00 UTC on the 1st of every month
-  workflow_dispatch: # Allows manual trigger from GitHub Actions UI
+    # Runs at 12:00 UTC every 5 days (1st, 6th, 11th, 16th, 21st, 26th) 
+    # ONLY during peak 13F filing months: 
+    # Q4 filings (Jan, Feb) | Q1 filings (Apr, May) | Q2 filings (Jul, Aug) | Q3 filings (Oct, Nov)
+    - cron: '0 12 */5 1,2,4,5,7,8,10,11 *'
+  
+  workflow_dispatch: # Allows you to trigger manual checks instantly from the GitHub UI
 
 jobs:
   audit-institutions:
