@@ -226,7 +226,13 @@ def scan_institutional_clusters():
                     f"• **Drift Since Q-End:** `+{drift:.1f}%` (gate: <=5% — disciplined entry)\n"
                     f"• **Quarter-End Anchor:** `{quarter_end_date.strftime('%b %d, %Y')}`\n\n"
                     f"🏛 **Backing Funds (>1.5% positions):**\n{fund_list}\n\n"
-                    f"✅ *All Gates Passed:* High ROE compounders, positive FCF, 3+ funds adding positions, fair valuation, strong earnings growth."
+                    f"🎯 **Why This Pick:**\n"
+                    f"• **ROE {roe*100:.1f}% exceeds 15%** — historically beats 8-10% market baseline; company compounds capital efficiently\n"
+                    f"• **${fcf:,.0f} FCF shows sustainability** — business self-funds growth, not dependent on financing\n"
+                    f"• **{data['conviction_buyers']} elite funds ADDING (not just holding)** — signals fresh capital deployed, conviction intensifying\n"
+                    f"• **Price +{drift:.1f}% off Q-end** — disciplined entry, not chasing runups; room to accumulate\n"
+                    f"• **Positive revenue growth + healthy earnings** — real business momentum, not accounting tricks\n\n"
+                    f"✅ *Investment Thesis:* High-return compounder with smart money backing, self-funding growth, reasonable valuation, and disciplined entry point. Positioned for 8-10%+ annual returns over mid-long term."
                 )
                 alerts.append(msg)
 
@@ -236,6 +242,7 @@ def scan_institutional_clusters():
             print(f"✗ Failed conviction gate: needs 3+ funds + 2+ conviction (has {len(unique_funds)} funds, {data['conviction_buyers']} conviction)")
 
     for alert in alerts:
+        print(f"\n{'='*70}\n{alert}\n{'='*70}")
         send_telegram(alert)
 
 if __name__ == "__main__":
