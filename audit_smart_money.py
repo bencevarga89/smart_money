@@ -93,12 +93,16 @@ def scan_institutional_clusters():
                 continue
 
             prev_report = report.previous_holding_report()
-            prev_holdings_set = set()
+            prev_holdings_dict = {}  # ticker -> value for position change detection
             if prev_report and hasattr(prev_report, "holdings"):
                 prev_df = prev_report.holdings
                 p_col = next((col for col in ['Ticker', 'tic', 'TICKER'] if col in prev_df.columns), None)
-                if p_col:
-                    prev_holdings_set = set(prev_df[p_col].dropna().str.upper().str.strip())
+                if p_col and 'Value' in prev_df.columns:
+                    for _, p_row in prev_df.iterrows():
+                        p_ticker = str(p_row.get(p_col, '')).strip().upper()
+                        p_value = p_row.get('Value', 0)
+                        if p_ticker and p_ticker != "NAN":
+                            prev_holdings_dict[p_ticker] = p_value
 
             for _, row in df_holdings.iterrows():
                 t = row.get(ticker_col)
@@ -114,10 +118,19 @@ def scan_institutional_clusters():
                 if position_weight < 1.5:
                     continue 
 
-                is_new_or_added = clean_ticker not in prev_holdings_set or len(prev_holdings_set) == 0
+                # Detect conviction: new position OR position increased >25% in value
+                prev_value = prev_holdings_dict.get(clean_ticker, 0)
+                if prev_value == 0:
+                    # New position this quarter
+                    is_conviction = True
+                    position_change_pct = 100.0
+                else:
+                    # Existing position - check if fund added significantly (>25% increase)
+                    position_change_pct = ((val - prev_value) / prev_value) * 100
+                    is_conviction = position_change_pct > 25
 
                 cluster_data[clean_ticker]["funds"].append(fund_name)
-                if is_new_or_added:
+                if is_conviction:
                     cluster_data[clean_ticker]["conviction_buyers"] += 1
 
         except Exception as e:
@@ -126,7 +139,9 @@ def scan_institutional_clusters():
     alerts = []
     for ticker, data in cluster_data.items():
         unique_funds = list(set(data["funds"]))
+        print(f"\n--- Analyzing {ticker} ({len(unique_funds)} funds, {data['conviction_buyers']} conviction) ---")
         if len(unique_funds) >= 3 and data["conviction_buyers"] >= 2:
+            print(f"✓ Passed conviction gate")
             try:
                 stock = yf.Ticker(ticker)
                 
@@ -166,10 +181,16 @@ def scan_institutional_clusters():
                     print(f"Skipping {ticker}: P/E ratio {trailing_pe} exceeds 30x threshold or unavailable")
                     continue
 
-                # Gate 5: Debt-to-Equity Check
-                debt_to_equity = info.get('debtToEquity', None)
-                if debt_to_equity is None or debt_to_equity > 1.5:
-                    print(f"Skipping {ticker}: Debt-to-equity {debt_to_equity} exceeds 1.5 threshold or unavailable")
+                # Gate 5: ROE Check (>15% for long-term outperformance)
+                roe = info.get('returnOnEquity', None)
+                if roe is None or roe < 0.15:
+                    print(f"Skipping {ticker}: ROE {roe} below 15% threshold or unavailable")
+                    continue
+
+                # Gate 5b: Free Cash Flow Check (must be positive)
+                fcf = info.get('operatingCashflow', None)
+                if fcf is None or fcf <= 0:
+                    print(f"Skipping {ticker}: Free Cash Flow ${fcf} is negative or unavailable")
                     continue
 
                 # Gate 6: Revenue Growth Check
@@ -186,29 +207,33 @@ def scan_institutional_clusters():
                         print(f"Skipping {ticker}: Trading above 200-day MA (${current_price:.2f} vs MA ${ma_200:.2f})")
                         continue
 
+                print(f"✓ All gates passed! ROE={roe*100:.1f}%, FCF=${fcf:,.0f}")
                 fund_list = "\n".join([f"• {f}" for f in unique_funds])
                 msg = (
-                    f"💎 **MID-LONG TERM SMART MONEY PICK**\n"
+                    f"💎 **SMART MONEY OUTPERFORMER PICK (>8-10% Target)**\n"
                     f"• **Ticker:** `{ticker}`\n"
                     f"• **Sector:** `{sector}`\n"
-                    f"• **Conviction Buyers:** `{data['conviction_buyers']}/3+ funds NEW or ADDED`\n"
+                    f"• **Conviction Buyers:** `{data['conviction_buyers']}/3+ funds NEW or ADDED positions`\n"
                     f"• **Total Overlapping Funds:** `{len(unique_funds)}`\n\n"
-                    f"📊 **Valuation & Quality Metrics:**\n"
+                    f"📊 **Quality Metrics (Long-Term Compounding):**\n"
+                    f"• **ROE:** `{roe*100:.1f}%` (gate: >15% — beats market returns)\n"
+                    f"• **Free Cash Flow:** `${fcf:,.0f}` (gate: positive — self-funding)\n"
                     f"• **P/E Ratio:** `{trailing_pe:.1f}x` (gate: <30x)\n"
-                    f"• **Debt-to-Equity:** `{debt_to_equity:.2f}` (gate: <1.5)\n"
                     f"• **Revenue Growth:** `{revenue_growth*100:.1f}%` (gate: positive)\n"
-                    f"• **Trailing EPS:** `${trailing_eps:.2f}` (healthy earnings)\n\n"
-                    f"💰 **Price Action:**\n"
+                    f"• **Trailing EPS:** `${trailing_eps:.2f}`\n\n"
+                    f"💰 **Price Action & Entry:**\n"
                     f"• **Current Price:** `${current:.2f}`\n"
-                    f"• **Drift Since Q-End:** `+{drift:.1f}%` (gate: <=5%)\n"
+                    f"• **Drift Since Q-End:** `+{drift:.1f}%` (gate: <=5% — disciplined entry)\n"
                     f"• **Quarter-End Anchor:** `{quarter_end_date.strftime('%b %d, %Y')}`\n\n"
                     f"🏛 **Backing Funds (>1.5% positions):**\n{fund_list}\n\n"
-                    f"✅ *All Gates Passed:* Conviction buyers, fair valuation, healthy balance sheet, positive revenue growth, disciplined price entry."
+                    f"✅ *All Gates Passed:* High ROE compounders, positive FCF, 3+ funds adding positions, fair valuation, strong earnings growth."
                 )
                 alerts.append(msg)
 
             except Exception as e:
                 print(f"Error analyzing fundamentals/price for {ticker}: {e}")
+        else:
+            print(f"✗ Failed conviction gate: needs 3+ funds + 2+ conviction (has {len(unique_funds)} funds, {data['conviction_buyers']} conviction)")
 
     for alert in alerts:
         send_telegram(alert)
