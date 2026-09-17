@@ -126,7 +126,7 @@ def scan_institutional_clusters():
     alerts = []
     for ticker, data in cluster_data.items():
         unique_funds = list(set(data["funds"]))
-        if len(unique_funds) >= 3:
+        if len(unique_funds) >= 3 and data["conviction_buyers"] >= 2:
             try:
                 stock = yf.Ticker(ticker)
                 
@@ -146,31 +146,64 @@ def scan_institutional_clusters():
                 current = float(hist["Close"].iloc[-1])
                 drift = ((current - q_start) / q_start) * 100
 
-                # Gate 2: Strict Price Drift Cap (Max +10.0% run-up since quarter end)
-                if drift > 10.0:
-                    print(f"Skipping {ticker}: Price drift +{drift:.1f}% exceeds 10% limit.")
+                # Gate 2: Strict Price Drift Cap (Max +5.0% run-up since quarter end)
+                if drift > 5.0:
+                    print(f"Skipping {ticker}: Price drift +{drift:.1f}% exceeds 5% limit.")
                     continue
 
                 info = stock.info
                 sector = info.get('sector', 'Unknown Sector')
                 trailing_eps = info.get('trailingEps', 0)
-                
+
                 # Gate 3: Fundamental Sanity Check
                 if trailing_eps is not None and trailing_eps < -2.0:
                     print(f"Skipping {ticker}: Severe negative earnings (EPS: {trailing_eps})")
                     continue
 
+                # Gate 4: Valuation Check (P/E Ratio)
+                trailing_pe = info.get('trailingPE', None)
+                if trailing_pe is None or trailing_pe > 30:
+                    print(f"Skipping {ticker}: P/E ratio {trailing_pe} exceeds 30x threshold or unavailable")
+                    continue
+
+                # Gate 5: Debt-to-Equity Check
+                debt_to_equity = info.get('debtToEquity', None)
+                if debt_to_equity is None or debt_to_equity > 1.5:
+                    print(f"Skipping {ticker}: Debt-to-equity {debt_to_equity} exceeds 1.5 threshold or unavailable")
+                    continue
+
+                # Gate 6: Revenue Growth Check
+                revenue_growth = info.get('revenueGrowth', None)
+                if revenue_growth is None or revenue_growth < 0:
+                    print(f"Skipping {ticker}: Revenue growth {revenue_growth} is negative or unavailable")
+                    continue
+
+                # Gate 7: 200-Day Moving Average (price entry discipline)
+                if len(hist) >= 200:
+                    ma_200 = hist["Close"].tail(200).mean()
+                    current_price = float(hist["Close"].iloc[-1])
+                    if current_price > ma_200:
+                        print(f"Skipping {ticker}: Trading above 200-day MA (${current_price:.2f} vs MA ${ma_200:.2f})")
+                        continue
+
                 fund_list = "\n".join([f"• {f}" for f in unique_funds])
                 msg = (
-                    f"💎 **ELITE SMART MONEY CLUSTER**\n"
+                    f"💎 **MID-LONG TERM SMART MONEY PICK**\n"
                     f"• **Ticker:** `{ticker}`\n"
                     f"• **Sector:** `{sector}`\n"
-                    f"• **Overlapping Funds:** `{len(unique_funds)}`\n"
-                    f"• **New/Accumulated Stakes:** `{data['conviction_buyers']} funds`\n"
-                    f"• **Price Drift:** `+{drift:.1f}%` (${current:.2f})\n"
-                    f"• **Baseline Quarter-End:** `{quarter_end_date.strftime('%b %d, %Y')}`\n\n"
-                    f"🏛 **Backing Funds (Weight > 1.5%):**\n{fund_list}\n\n"
-                    f"💡 *Institutional Quality Check Passed:* High portfolio conviction, solid earnings baseline, and strict price discipline (<= 10% drift from quarter-end)."
+                    f"• **Conviction Buyers:** `{data['conviction_buyers']}/3+ funds NEW or ADDED`\n"
+                    f"• **Total Overlapping Funds:** `{len(unique_funds)}`\n\n"
+                    f"📊 **Valuation & Quality Metrics:**\n"
+                    f"• **P/E Ratio:** `{trailing_pe:.1f}x` (gate: <30x)\n"
+                    f"• **Debt-to-Equity:** `{debt_to_equity:.2f}` (gate: <1.5)\n"
+                    f"• **Revenue Growth:** `{revenue_growth*100:.1f}%` (gate: positive)\n"
+                    f"• **Trailing EPS:** `${trailing_eps:.2f}` (healthy earnings)\n\n"
+                    f"💰 **Price Action:**\n"
+                    f"• **Current Price:** `${current:.2f}`\n"
+                    f"• **Drift Since Q-End:** `+{drift:.1f}%` (gate: <=5%)\n"
+                    f"• **Quarter-End Anchor:** `{quarter_end_date.strftime('%b %d, %Y')}`\n\n"
+                    f"🏛 **Backing Funds (>1.5% positions):**\n{fund_list}\n\n"
+                    f"✅ *All Gates Passed:* Conviction buyers, fair valuation, healthy balance sheet, positive revenue growth, disciplined price entry."
                 )
                 alerts.append(msg)
 
