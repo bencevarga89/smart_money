@@ -75,23 +75,30 @@ def scan_institutional_clusters():
 
     for cik, fund_name in TOP_12_FUNDS.items():
         try:
+            print(f"Fetching {fund_name} ({cik})...", flush=True)
             company = Company(cik)
             report = get_latest_valid_filing(company)
             if not report:
+                print(f"  → No valid 13F filing found")
                 continue
+            print(f"  → Filing found, parsing holdings...")
                 
             df_holdings = getattr(report, "holdings", None)
             if df_holdings is None or df_holdings.empty:
                 df_holdings = getattr(report, "infotable", None)
             if df_holdings is None or df_holdings.empty:
+                print(f"  → No holdings found")
                 continue
+            print(f"  → {len(df_holdings)} holdings found")
 
             total_portfolio_value = df_holdings['Value'].sum() if 'Value' in df_holdings.columns else 1
             ticker_col = next((col for col in ['Ticker', 'tic', 'TICKER'] if col in df_holdings.columns), None)
             
             if not ticker_col:
+                print(f"  → No ticker column found")
                 continue
 
+            holdings_over_1_5_pct = 0
             prev_report = report.previous_holding_report()
             prev_holdings_dict = {}  # ticker -> value for position change detection
             if prev_report and hasattr(prev_report, "holdings"):
@@ -116,7 +123,8 @@ def scan_institutional_clusters():
                 # Gate 1: Skin in the game (Position >= 1.5% of total portfolio value)
                 position_weight = (val / total_portfolio_value) * 100 if total_portfolio_value > 0 else 0
                 if position_weight < 1.5:
-                    continue 
+                    continue
+                holdings_over_1_5_pct += 1 
 
                 # Detect conviction: new position OR position increased >25% in value
                 prev_value = prev_holdings_dict.get(clean_ticker, 0)
@@ -135,6 +143,11 @@ def scan_institutional_clusters():
 
         except Exception as e:
             print(f"Error parsing fund {fund_name}: {e}")
+        else:
+            print(f"  → {holdings_over_1_5_pct} holdings passed Gate 1 (>=1.5% weight)")
+
+    print(f"\n=== CLUSTERING RESULTS ===")
+    print(f"Total unique tickers from Gate 1: {len(cluster_data)}")
 
     alerts = []
     for ticker, data in cluster_data.items():
